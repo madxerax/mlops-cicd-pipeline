@@ -1,0 +1,85 @@
+name: CD - Build & Deploy
+
+# El CD corre solo cuando CI termina con éxito en la rama main.
+on:
+  workflow_run:
+    workflows: ["CI - MLOps Pipeline"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write  # para publicar en GitHub Container Registry (GHCR)
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  build-and-push:
+    name: Build y push de imagen
+    runs-on: ubuntu-latest
+    # Guard: solo si el run de CI fue exitoso.
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias y entrenar modelo de release
+        run: |
+          pip install -r requirements.txt
+          python -m src.train --n-estimators 300
+          python -m src.validate_model
+
+      - name: Login en GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Metadata de la imagen (tags y labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=raw,value=latest
+
+      - name: Build y push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Desplegar (canary -> producción)
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    # 'environment' habilita aprobaciones manuales y secretos por ambiente.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Desplegar canary (10% del tráfico)
+        run: |
+          echo "Desplegando ${IMAGE_NAME}:${GITHUB_SHA::7} como canary al 10%..."
+          # Aquí irían tus comandos reales, por ejemplo:
+          #   gcloud run deploy api --image ${IMAGE_NAME}:${GITHUB_SHA::7} --tag canary --no-traffic
+          #   gcloud run services update-traffic api --to-tags canary=10
+      - name: Verificar salud del canary
+        run: |
+          echo "Monitoreando métricas del canary (latencia, error rate)..."
+          # Espacio para checks automáticos antes de promover.
+      - name: Promover a 100%
+        run: |
+          echo "Canary saludable. Promoviendo a producción..."
+          #   gcloud run services update-traffic api --to-latest
